@@ -1,0 +1,3 @@
+providers.env
+*.env
+.smart-free-router/

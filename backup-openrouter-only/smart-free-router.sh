@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smart Free Router for OpenClaude + multiple providers
+# Smart Free Router for OpenClaude + OpenRouter
 #
 # Builds a live, free-only, tool-capable model chain from OpenRouter's catalog,
 # starts a temporary loopback proxy that retries failed completions on the next
@@ -10,7 +10,6 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SELECTOR="$SCRIPT_DIR/model_selector.py"
-PROVIDER_SELECTOR="$SCRIPT_DIR/provider_selector.py"
 PROXY="$SCRIPT_DIR/openrouter_free_proxy.mjs"
 STATE_DIR="${SMART_FREE_ROUTER_HOME:-$HOME/.smart-free-router}"
 CACHE_DIR="$STATE_DIR/cache"
@@ -20,7 +19,6 @@ CATALOG_TTL_SECONDS="${SMART_FREE_ROUTER_CATALOG_TTL:-21600}"
 MIN_CONTEXT="${SMART_FREE_ROUTER_MIN_CONTEXT:-131072}"
 MODEL_COUNT="${SMART_FREE_ROUTER_MODEL_COUNT:-5}"
 OPENCLAUDE_BIN="${OPENCLAUDE_BIN:-openclaude}"
-PROVIDER_ENV_FILE="${SMART_FREE_ROUTER_ENV_FILE:-$HOME/.smart-free-router/providers.env}"
 
 TASK="coding"
 CONTINUE_SESSION=0
@@ -46,17 +44,13 @@ Usage:
 Options:
   --continue, -c       Resume OpenClaude's latest conversation in this directory.
   --refresh            Refresh the cached OpenRouter catalog before selection.
-  --dry-run            Print the proposed provider/model chain without launching OpenClaude.
+  --dry-run            Print the proposed free model chain without launching OpenClaude.
   --models N           Use 2–12 fallback candidates (default: 5).
   --min-context N      Minimum context window in tokens (default: 131072).
   --help, -h           Show this help.
 
 Environment:
-  SMART_FREE_ROUTER_ENV_FILE         Protected key file (default: ~/.smart-free-router/providers.env).
-  OPENROUTER_API_KEY                 Optional if another provider is configured.
-  GEMINI_API_KEY/GROQ_API_KEY        Optional independent provider keys.
-  CEREBRAS_API_KEY/MISTRAL_API_KEY   Optional independent provider keys.
-  MOONSHOT_API_KEY/DEEPSEEK_API_KEY  Optional Kimi/DeepSeek keys; DeepSeek may be paid.
+  OPENROUTER_API_KEY                 Required. Never written to disk by this launcher.
   OPENCLAUDE_BIN                     OpenClaude executable (default: openclaude).
   SMART_FREE_ROUTER_HOME             Router state directory (default: ~/.smart-free-router).
   SMART_FREE_ROUTER_CATALOG_TTL      Catalog cache seconds (default: 21600).
@@ -97,7 +91,7 @@ done
 [[ "$MODEL_COUNT" =~ ^[0-9]+$ ]] && ((MODEL_COUNT >= 2 && MODEL_COUNT <= 12)) || fail "--models must be 2–12."
 [[ "$MIN_CONTEXT" =~ ^[0-9]+$ ]] && ((MIN_CONTEXT >= 8192)) || fail "--min-context must be 8192 or larger."
 [[ "$CATALOG_TTL_SECONDS" =~ ^[0-9]+$ ]] || fail "SMART_FREE_ROUTER_CATALOG_TTL must be an integer."
-[[ -r "$SELECTOR" && -r "$PROVIDER_SELECTOR" && -r "$PROXY" ]] || fail "Router files are incomplete. Keep this launcher beside the selector and proxy files."
+[[ -r "$SELECTOR" && -r "$PROXY" ]] || fail "Router files are incomplete. Keep this launcher beside model_selector.py and openrouter_free_proxy.mjs."
 
 for command in curl jq python3 node; do
   command -v "$command" >/dev/null 2>&1 || fail "Required command not found: $command"
@@ -105,19 +99,10 @@ done
 if (( ! DRY_RUN )); then
   command -v "$OPENCLAUDE_BIN" >/dev/null 2>&1 || fail "OpenClaude not found. Install it with: npm install -g @gitlawb/openclaude@latest"
 fi
+[[ -n "${OPENROUTER_API_KEY:-}" ]] || fail "Set OPENROUTER_API_KEY before running this launcher."
+
 umask 077
 mkdir -p "$CACHE_DIR" "$RUN_DIR"
-
-if [[ -f "$PROVIDER_ENV_FILE" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "$PROVIDER_ENV_FILE"
-  set +a
-fi
-
-if [[ -z "${OPENROUTER_API_KEY:-}${GEMINI_API_KEY:-}${GROQ_API_KEY:-}${CEREBRAS_API_KEY:-}${MISTRAL_API_KEY:-}${MOONSHOT_API_KEY:-}${DEEPSEEK_API_KEY:-}" ]]; then
-  fail "No provider keys found. Create $PROVIDER_ENV_FILE or export at least one provider API key."
-fi
 
 catalog_is_fresh() {
   [[ -s "$CATALOG_FILE" ]] || return 1
@@ -126,7 +111,7 @@ catalog_is_fresh() {
   (( age < CATALOG_TTL_SECONDS ))
 }
 
-if [[ -n "${OPENROUTER_API_KEY:-}" ]] && { (( REFRESH )) || ! catalog_is_fresh; }; then
+if (( REFRESH )) || ! catalog_is_fresh; then
   say "${C_CYAN}Refreshing OpenRouter's live tool-capable text catalog…${C_RESET}"
   temp_catalog="$(mktemp "$CACHE_DIR/models.XXXXXX")"
   if ! curl --fail --silent --show-error --location --retry 2 --retry-delay 1 \
@@ -141,7 +126,7 @@ if [[ -n "${OPENROUTER_API_KEY:-}" ]] && { (( REFRESH )) || ! catalog_is_fresh; 
   else
     mv "$temp_catalog" "$CATALOG_FILE"
   fi
-elif [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
+else
   say "${C_CYAN}Using cached OpenRouter catalog (set --refresh to update).${C_RESET}"
 fi
 
@@ -151,12 +136,7 @@ OPENCLAUDE_SETTINGS="$RUN_DIR/$STAMP-openclaude-settings.json"
 PROXY_READY="$RUN_DIR/$STAMP-proxy-ready.json"
 PROXY_LOG="$RUN_DIR/$STAMP-proxy.log"
 
-if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
-  PROVIDER_CATALOG_ARGS=(--openrouter-catalog "$CATALOG_FILE")
-else
-  PROVIDER_CATALOG_ARGS=()
-fi
-if ! python3 "$PROVIDER_SELECTOR" "${PROVIDER_CATALOG_ARGS[@]}" --task "$TASK" --min-context "$MIN_CONTEXT" --limit "$MODEL_COUNT" > "$SESSION_CONFIG"; then
+if ! python3 "$SELECTOR" --catalog "$CATALOG_FILE" --task "$TASK" --min-context "$MIN_CONTEXT" --limit "$MODEL_COUNT" > "$SESSION_CONFIG"; then
   rm -f "$SESSION_CONFIG"
   fail "The live catalog does not currently offer enough compatible free models. Try --min-context 65536 or --refresh."
 fi
@@ -175,25 +155,26 @@ jq '{
 
 say ""
 say "${C_CYAN}${C_BOLD}Smart Free Router — ${TASK}${C_RESET}"
-say "${C_CYAN}Live provider/model fallback chain:${C_RESET}"
+say "${C_CYAN}Live, free-only, tool-capable model chain:${C_RESET}"
 jq -r '.models | to_entries[] | "  \(.key + 1). \(.value.id)  [score \(.value.score), ctx \(.value.context_length), out \(.value.max_output_tokens)]\n     \(.value.reasons | join(", "))"' "$SESSION_CONFIG"
 say ""
 
 # Checking key metadata does not use an inference request. It provides an early,
 # useful message when the account-wide free daily pool is already exhausted.
 key_info=""
-if [[ -n "${OPENROUTER_API_KEY:-}" ]] && key_info=$(curl --silent --show-error --fail --connect-timeout 8 --max-time 15 \
+if key_info=$(curl --silent --show-error --fail --connect-timeout 8 --max-time 15 \
   -H "Authorization: Bearer $OPENROUTER_API_KEY" 'https://openrouter.ai/api/v1/key' 2>/dev/null); then
   daily_remaining=$(jq -r '.data.free_model_daily_requests.remaining // empty' <<<"$key_info")
   daily_limit=$(jq -r '.data.free_model_daily_requests.limit // empty' <<<"$key_info")
   if [[ -n "$daily_remaining" && -n "$daily_limit" ]]; then
     say "${C_CYAN}OpenRouter free-request pool: ${daily_remaining}/${daily_limit} remaining today.${C_RESET}"
     if [[ "$daily_remaining" == "0" ]]; then
-      warn "OpenRouter daily free pool is exhausted. The router will use other configured providers instead."
+      warn "The account-wide free daily pool is exhausted. Switching models cannot bypass that limit; no chat is being started."
+      exit 2
     fi
   fi
 else
-  warn "Could not read OpenRouter key metadata. Continuing with the configured provider chain."
+  warn "Could not read OpenRouter key metadata. Continuing; the first request will still report authentication or quota errors."
 fi
 
 if (( DRY_RUN )); then
@@ -203,15 +184,7 @@ fi
 
 # The loopback proxy owns the real key. OpenClaude receives a disposable local
 # placeholder and cannot make an accidental direct OpenRouter request.
-env \
-  OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-}" \
-  GEMINI_API_KEY="${GEMINI_API_KEY:-}" \
-  GROQ_API_KEY="${GROQ_API_KEY:-}" \
-  CEREBRAS_API_KEY="${CEREBRAS_API_KEY:-}" \
-  MISTRAL_API_KEY="${MISTRAL_API_KEY:-}" \
-  MOONSHOT_API_KEY="${MOONSHOT_API_KEY:-}" \
-  DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}" \
-  node "$PROXY" \
+OPENROUTER_API_KEY="$OPENROUTER_API_KEY" node "$PROXY" \
   --config "$SESSION_CONFIG" \
   --ready-file "$PROXY_READY" \
   --port 0 \

@@ -6,14 +6,13 @@ The router retrieves OpenRouter’s current model catalog, ranks only free, tool
 
 ## Installation
 
-OpenClaude 0.18.0 or later is recommended because that release extended interactive fallback handling. For Android/Termux, use the dedicated [Termux setup guide](TERMUX_SETUP.md) instead of the generic npm command below. The router itself supplies a longer multi-model chain, so it needs only a recent OpenClaude OpenAI-compatible client path.
+OpenClaude 0.18.0 or later is recommended because that release extended interactive fallback handling. The router itself supplies a longer multi-model chain, so it needs only a recent OpenClaude OpenAI-compatible client path.
 
 ```bash
 npm install -g @gitlawb/openclaude@latest
 cd /path/to/model-router
 chmod +x smart-free-router.sh
-read -s OPENROUTER_API_KEY
-export OPENROUTER_API_KEY
+export OPENROUTER_API_KEY='sk-or-...'
 ```
 
 The launcher uses only `curl`, `jq`, Python 3, and Node.js in addition to OpenClaude. On a standard Linux/macOS development setup these are normally already available.
@@ -95,3 +94,47 @@ The proxy listens only on `127.0.0.1` on a random port and exits when OpenClaude
 ## Sources
 
 The design follows OpenRouter’s documentation for [model fallbacks](https://openrouter.ai/docs/guides/routing/model-fallbacks), [provider routing](https://openrouter.ai/docs/guides/routing/provider-selection), the [Models API](https://openrouter.ai/docs/guides/overview/models), and [free-model limits](https://openrouter.ai/docs/api_reference/limits). It also uses OpenClaude’s documented [configuration](https://openclaude.gitlawb.com/docs/configuration/), [provider](https://openclaude.gitlawb.com/docs/providers/), and [CLI fallback](https://openclaude.gitlawb.com/docs/cli-reference/) behavior.
+
+
+## Multi-provider mode
+
+The router can use independent provider quotas. Supported adapters are OpenRouter, Gemini, Groq, Cerebras, Mistral, Moonshot/Kimi, and optional DeepSeek. Gemini, Groq, Cerebras, Mistral, and Moonshot expose OpenAI-style chat endpoints; DeepSeek is compatible but may require paid credits and is never assumed to be free.
+
+The selector reserves fallback capacity for each configured provider instead of allowing OpenRouter's large catalog to fill every slot. If OpenRouter's account-wide free pool is exhausted, the proxy continues to another configured provider and resends the same OpenClaude request and message history. Keys are selected from the candidate's provider environment variable, so a key is never sent to the wrong provider.
+
+### One-time key setup
+
+Run this once from the router directory:
+
+```bash
+./setup-provider-keys.sh
+```
+
+It creates `~/.smart-free-router/providers.env` with mode `600`. Enter only the keys you have and press Enter to skip a provider. The file is outside the repository and is ignored by Git. The launcher loads it automatically on every run:
+
+```bash
+./smart-free-router.sh coding --refresh --dry-run
+./smart-free-router.sh coding
+```
+
+The example template is `providers.env.example`; it contains no real credentials. If a key was exposed in chat or shell history, revoke it and create a replacement.
+
+### Provider environment variables
+
+| Provider | Key variable | Base URL | Free status |
+| --- | --- | --- | --- |
+| OpenRouter | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1` | Free pool is account-wide. |
+| Gemini | `GEMINI_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/openai` | Google free-tier quota, subject to current limits. |
+| Groq | `GROQ_API_KEY` | `https://api.groq.com/openai/v1` | Separate free rate limits, subject to current limits. |
+| Cerebras | `CEREBRAS_API_KEY` | `https://api.cerebras.ai/v1` | Free-trial rate limits, subject to current limits. |
+| Mistral | `MISTRAL_API_KEY` | `https://api.mistral.ai/v1` | Account/region dependent. |
+| Moonshot/Kimi | `MOONSHOT_API_KEY` | `https://api.moonshot.ai/v1` | Account/region dependent. |
+| DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com` | Optional; may be paid, never treated as guaranteed free. |
+
+Optional model overrides can be set in `providers.env`, for example `GROQ_MODELS=llama-4-scout-17b-16e-instruct,qwen/qwen3-32b`. The provider catalog and model names can change, so check the provider's current documentation when a model is retired.
+
+### Limits and behavior
+
+Provider switching does not bypass any provider's own quota, terms, or rate limits. It only lets the router use separate legitimate provider quotas. The proxy retries transient HTTP failures, model overload, timeouts, and quota/rate-limit responses; it does not hide invalid keys or malformed requests. The same OpenClaude process remains open, but provider model capabilities can differ, so tool support and context limits may vary.
+
+Official endpoint references: [Gemini OpenAI compatibility](https://ai.google.dev/gemini-api/docs/openai), [Gemini limits](https://ai.google.dev/gemini-api/docs/rate-limits), [Groq OpenAI compatibility](https://console.groq.com/docs/openai), [Cerebras OpenAI compatibility](https://inference-docs.cerebras.ai/resources/openai), [Mistral API](https://docs.mistral.ai/api/), [Moonshot API](https://platform.moonshot.ai/docs/api/chat), and [DeepSeek API](https://api-docs.deepseek.com/).

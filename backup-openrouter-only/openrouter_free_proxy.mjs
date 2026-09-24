@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Loopback-only OpenAI-compatible proxy for OpenClaude + multiple providers.
+ * Loopback-only OpenAI-compatible proxy for OpenClaude + OpenRouter free models.
  *
  * It replaces the requested model with one candidate from a generated free-only
  * chain. Each failed request advances to the next model while the client keeps
@@ -26,7 +26,7 @@ function usage() {
 }
 
 function parseArgs(argv) {
-  const options = { port: 0, bufferStreams: true, upstream: null };
+  const options = { port: 0, bufferStreams: true, upstream: DEFAULT_UPSTREAM };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--config') options.config = argv[++index];
@@ -51,11 +51,6 @@ function readConfig(configPath) {
   const ids = config.models.map((model) => model?.id).filter(Boolean);
   if (ids.length !== config.models.length || new Set(ids).size !== ids.length) {
     throw new Error('Proxy model candidates must have unique non-empty ids.');
-  }
-  for (const model of config.models) {
-    if (!model.provider || !model.base_url || !model.key_env) {
-      throw new Error(`Candidate ${model.id} must include provider, base_url, and key_env.`);
-    }
   }
   return { ...config, models: config.models.map((model) => ({ ...model, id: String(model.id) })) };
 }
@@ -227,7 +222,7 @@ async function sendAttempt({ requestJson, candidate, fallbackModels, requestHead
   // OpenRouter accepts at most three entries in its native `models` array.
   // The local loop still supports the complete generated chain and advances
   // beyond this three-model window if the upstream request fails.
-  if (candidate.provider === 'openrouter' && fallbackModels.length > 0) payload.models = fallbackModels.slice(0, 3);
+  if (fallbackModels.length > 0) payload.models = fallbackModels.slice(0, 3);
   else delete payload.models;
  const controller = new AbortController();
  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -245,7 +240,7 @@ async function sendAttempt({ requestJson, candidate, fallbackModels, requestHead
   }
 }
 
-async function handleChatCompletion({ request, response, config, bufferStreams, upstreamOverride }) {
+async function handleChatCompletion({ request, response, config, apiKey, target, bufferStreams }) {
   let rawBody;
   try {
     rawBody = await readBody(request);
@@ -267,22 +262,12 @@ async function handleChatCompletion({ request, response, config, bufferStreams, 
   let lastResult;
   for (let index = 0; index < config.models.length; index += 1) {
     const candidate = config.models[index];
-    const apiKey = process.env[candidate.key_env];
-    if (!apiKey) {
-      log('candidate_skipped_missing_key', { provider: candidate.provider, model: candidate.id });
-      continue;
-    }
-    const target = upstreamUrl(upstreamOverride || candidate.base_url, request.url || '/');
-    const fallbackModels = config.models
-      .slice(index + 1)
-      .filter((model) => model.provider === candidate.provider)
-      .map((model) => model.id);
     let result;
     try {
       result = await sendAttempt({
        requestJson,
        candidate,
-        fallbackModels,
+        fallbackModels: config.models.slice(index + 1).map((model) => model.id),
        requestHeaders: request.headers,
        apiKey,
        target,
@@ -292,9 +277,7 @@ async function handleChatCompletion({ request, response, config, bufferStreams, 
       const syntheticError = { code: 502, message: error.name === 'AbortError' ? 'Upstream request timed out.' : error.message };
       const decision = retryable(syntheticError, {});
       log('attempt_transport_error', { model: candidate.id, attempt: index + 1, reason: decision.reason });
-      const nextProviderAvailable = index + 1 < config.models.length
-        && config.models.slice(index + 1).some((model) => model.provider !== candidate.provider);
-      if (index + 1 < config.models.length && (decision.retry || (decision.reason === 'platform_rate_limit_exhausted' && nextProviderAvailable))) continue;
+      if (index + 1 < config.models.length && decision.retry) continue;
       sendJson(response, 502, { error: syntheticError });
       return;
     }
@@ -319,9 +302,7 @@ async function handleChatCompletion({ request, response, config, bufferStreams, 
       status: failure.code || result.upstreamResponse.status,
       reason: decision.reason,
     });
-    const nextProviderAvailable = index + 1 < config.models.length
-      && config.models.slice(index + 1).some((model) => model.provider !== candidate.provider);
-    if (index + 1 < config.models.length && (decision.retry || (decision.reason === 'platform_rate_limit_exhausted' && nextProviderAvailable))) continue;
+    if (index + 1 < config.models.length && decision.retry) continue;
 
     const headers = responseHeaders(result.upstreamResponse.headers);
     sendBuffer(response, result.upstreamResponse.status, headers, result.body);
@@ -337,14 +318,10 @@ async function handleChatCompletion({ request, response, config, bufferStreams, 
   }
 }
 
-async function handlePassthrough({ request, response, config, upstreamOverride }) {
+async function handlePassthrough({ request, response, apiKey, target }) {
   let body = Buffer.alloc(0);
   try {
     if (!['GET', 'HEAD'].includes(request.method)) body = await readBody(request);
-    const candidate = config.models.find((model) => process.env[model.key_env]);
-    if (!candidate) throw new Error('No configured provider API key is available.');
-    const apiKey = process.env[candidate.key_env];
-    const target = upstreamUrl(upstreamOverride || candidate.base_url, request.url || '/');
     const headers = outboundHeaders(request.headers, apiKey);
     if (body.length === 0 && ['GET', 'HEAD'].includes(request.method)) delete headers['content-type'];
     const upstreamResponse = await fetch(target, {
@@ -374,6 +351,13 @@ async function main() {
     return;
   }
 
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    console.error('OPENROUTER_API_KEY is required by the local proxy.');
+    process.exitCode = 2;
+    return;
+  }
+
   let config;
   try {
     config = readConfig(options.config);
@@ -384,6 +368,7 @@ async function main() {
   }
 
   const server = http.createServer(async (request, response) => {
+    const target = upstreamUrl(options.upstream, request.url || '/');
     const localPath = new URL(request.url || '/', 'http://127.0.0.1').pathname;
     if (request.method === 'GET' && localPath === '/health') {
       sendJson(response, 200, { status: 'ok', models: config.models.map((model) => model.id) });
@@ -394,12 +379,13 @@ async function main() {
         request,
         response,
         config,
+        apiKey,
+        target,
         bufferStreams: options.bufferStreams,
-        upstreamOverride: options.upstream,
       });
       return;
     }
-    await handlePassthrough({ request, response, config, upstreamOverride: options.upstream });
+    await handlePassthrough({ request, response, apiKey, target });
   });
 
   server.on('clientError', (error, socket) => {

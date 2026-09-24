@@ -14,7 +14,10 @@ const configPath = path.join(temp, 'chain.json');
 const requests = [];
 
 fs.writeFileSync(configPath, JSON.stringify({
-  models: [{ id: 'vendor/first:free' }, { id: 'vendor/second:free' }],
+  models: [
+    { id: 'vendor/first:free', provider: 'openrouter', base_url: 'http://unused/v1', key_env: 'OPENROUTER_API_KEY' },
+    { id: 'vendor/second:free', provider: 'openrouter', base_url: 'http://unused/v1', key_env: 'OPENROUTER_API_KEY' },
+  ],
 }));
 
 function listen(server) {
