@@ -237,3 +237,23 @@ After saving the keys, test the complete chain:
 The output should show provider names such as `openrouter`, `gemini`, `groq`, and `cerebras` beside the candidate models. If OpenRouter reports `0/50`, the router will continue to the next configured provider instead of stopping, provided that provider has a working key.
 
 If a key was exposed in chat or shell history, revoke it and create a replacement. Never upload `~/.smart-free-router/providers.env` to GitHub.
+
+## Which version should I run?
+
+The active version is the multi-provider router in the repository root. Start it with:
+
+    ./smart-free-router.sh coding --models 7
+
+This version supports OpenRouter, Gemini, Cerebras, Groq, Mistral, and Moonshot/Kimi when their keys are configured. DeepSeek is optional and is not enabled unless its key is deliberately added.
+
+The folder backup-openrouter-only/ contains the previous OpenRouter-only version. It is kept only as a backup and should not normally be used.
+
+The real provider keys are stored locally at:
+
+    /root/.smart-free-router/providers.env
+
+That file is intentionally not stored in GitHub. If the repository is installed again, run:
+
+    ./setup-provider-keys.sh
+
+and enter the provider keys again.
